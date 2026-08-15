@@ -86,6 +86,12 @@ module MiniRecord
         @create_table_options || (defined?(ApplicationRecord) ? ApplicationRecord.instance_variable_get(:@create_table_options) : {})
       end
 
+      # A model whose constant no longer resolves to it - removed, or replaced by class reloading -
+      # stays in descendants until the garbage collector takes it, and its schema is stale.
+      def orphaned_model?
+        name.nil? || !Object.const_defined?(name) || Object.const_get(name) != self
+      end
+
       def rename_fields
         @rename_fields ||= {}
       end
@@ -126,6 +132,10 @@ module MiniRecord
 
         args.each do |column_name|
 
+          # A later declaration of a column replaces the earlier one, i.e. timestamps followed by
+          # an explicit created_at, which Rails refuses to do on its own.
+          remove_field_definition(column_name, type)
+
           # Allow custom types like:
           #   t.column :type, "ENUM('EMPLOYEE','CLIENT','SUPERUSER','DEVELOPER')"
           if type.is_a?(String)
@@ -136,6 +146,8 @@ module MiniRecord
             # wil be converted in: t.string :name
             table_definition.send(type, column_name, **options)
           end
+
+          honor_reference_limit(column_name, type, options[:limit])
 
           # Get the correct column_name i.e. in field :category, :as => :references
           column_name = table_definition.columns[-1].name
@@ -157,6 +169,25 @@ module MiniRecord
       alias :key       :field
       alias :property  :field
       alias :col       :field
+
+      def reference_type?(type)
+        [:references, :belongs_to].include?(type)
+      end
+
+      # Clears any previous definition of the column, so that redeclaring a field replaces it
+      # instead of raising. A reference brings its own columns along.
+      def remove_field_definition(column_name, type)
+        names = reference_type?(type) ? [column_name, "#{column_name}_id", "#{column_name}_type"] : [column_name]
+        names.each { |name| table_definition.remove_column(name) }
+      end
+
+      # Reference columns are bigint in Rails 5.1 and later, which drops any :limit given for them.
+      def honor_reference_limit(column_name, type, limit)
+        if limit && reference_type?(type)
+          reference = table_definition.columns.detect { |column| column.name == "#{column_name}_id" }
+          reference.type = :integer if reference
+        end
+      end
 
       def postgresql_limitless_column? type
         return unless defined?(ActiveRecord::ConnectionAdapters::PostgreSQLAdapter) and connection.is_a?(ActiveRecord::ConnectionAdapters::PostgreSQLAdapter)
@@ -237,11 +268,14 @@ module MiniRecord
       def remove_foreign_keys
         indexes.each do |name, options|
           if options[:foreign]==false
-            foreign_key = foreign_keys.detect { |fk| fk.options[:column] == options[:column].to_s }
+            foreign_key = foreign_keys.detect { |fk| fk[:options][:column] == options[:column].to_s }
             if foreign_key
+              # sqlite leaves its constraints unnamed, so identify those by the column they are on
+              identifier = foreign_key[:options][:name] ? {:name => foreign_key[:options][:name]} : {:column => foreign_key[:options][:column]}
               perform_destructive_action do
-                logger.warn "[MiniRecord] Removing Foreign Key #{foreign_key.options[:name]} on table #{table_name}" if logger
-                connection.remove_foreign_key(table_name, :name => foreign_key.options[:name]) unless @dry_run
+                logger.warn "[MiniRecord] Removing Foreign Key #{foreign_key[:options][:name] || foreign_key[:options][:column]} on table #{table_name}" if logger
+                # sqlite guesses the table a key points at from the column name unless it is given
+                connection.remove_foreign_key(table_name, foreign_key[:to_table], **identifier) unless @dry_run
                 foreign_keys.delete(foreign_key)
               end
             end
@@ -291,6 +325,9 @@ module MiniRecord
 
           old_value = 0 if att == :scale and old_value.nil? and value == 0
 
+          # A custom type carries limit 0, which no database reports back
+          old_value = 0 if att == :limit and old_value.nil? and value == 0
+
           attr_changed = false
           if att == :default
             # Rails 4.2 changed behavior to pass DB values directly through, so we must re-map
@@ -301,6 +338,13 @@ module MiniRecord
             elsif value.to_s.sub(/\.0+\Z/, "") != old_value.to_s.sub(/\.0+\Z/, "") # ignore trailing zeroes after a decimal point
               attr_changed = true
             end
+          elsif att == :type
+            # Rails reports a bigint column as an eight byte :integer, so a reference would
+            # otherwise be found to differ from its own definition on every run. The type has
+            # really changed only when the column the schema asks for is neither the one the
+            # database reports nor the one the adapter would build from it.
+            wanted = get_sql_field_type(fields[field])
+            attr_changed = value != old_value && !wanted.casecmp?(fields_in_db[field].sql_type) && !wanted.casecmp?(get_sql_field_type(fields_in_db[field]))
           elsif value != old_value
             attr_changed = true
           end
@@ -314,7 +358,8 @@ module MiniRecord
           end
         end
 
-        [new_attr, changed]
+        # Nothing to apply when the column matches the schema, whatever its attributes happen to be.
+        [changed ? new_attr : {}, changed]
       end
 
       # dry-run
@@ -332,7 +377,7 @@ module MiniRecord
         @destructive_change_needed = false
 
         if self == ActiveRecord::Base
-          descendants.each { |model| model.auto_upgrade!(@dry_run) }
+          descendants.reject(&:orphaned_model?).each { |model| model.auto_upgrade!(@dry_run) }
           clear_tables!
         else
           # If table doesn't exist, create it
@@ -356,7 +401,8 @@ module MiniRecord
               type_key    = "#{association.name.to_s}_type"
               case association.macro
               when :belongs_to
-                field foreign_key, :as => :integer unless fields.key?(foreign_key.to_s)
+                # Primary keys are bigint, and a foreign key has to be able to hold one
+                field foreign_key, :as => :bigint unless fields.key?(foreign_key.to_s)
                 if association.options[:polymorphic]
                   field type_key, :as => :string unless fields.key?(type_key.to_s)
                   index [foreign_key, type_key] unless suppressed_indexes[association.name]
@@ -382,14 +428,17 @@ module MiniRecord
                   logger.warn "[MiniRecord] Creating Join Table #{table} with keys #{foreign_key} and #{association_foreign_key}" if logger
                   unless @dry_run
                     connection.create_table(table, :id => false) do |t|
-                      t.integer foreign_key
-                      t.integer association_foreign_key
+                      t.bigint foreign_key
+                      t.bigint association_foreign_key
                     end
                   end
-                  index_name = connection.index_name(table, :column => [foreign_key, association_foreign_key])
+                  # Either side of the association may reach the join table first, so order the
+                  # index by name to get the same one whichever model is upgraded first
+                  index_columns = [foreign_key.to_s, association_foreign_key.to_s].sort
+                  index_name = connection.index_name(table, :column => index_columns)
                   index_name = index_name[0...connection.index_name_length] if index_name.length > connection.index_name_length
-                  logger.warn "[MiniRecord] Creating Join Table Index #{index_name} (#{foreign_key}, #{association_foreign_key}) on #{table}" if logger
-                  connection.add_index table, [foreign_key, association_foreign_key], :name => index_name, :unique => true unless @dry_run or suppressed_indexes[association.name]
+                  logger.warn "[MiniRecord] Creating Join Table Index #{index_name} (#{index_columns.join(', ')}) on #{table}" if logger
+                  connection.add_index table, index_columns, :name => index_name, :unique => true unless @dry_run or suppressed_indexes[association.name]
                 end
                 # Add join table to our schema tables
                 schema_tables << table unless schema_tables.include?(table)
@@ -438,7 +487,9 @@ module MiniRecord
                 if changed
                   perform_destructive_action do
                     logger.warn "[MiniRecord] Changing column #{table_name}.#{field} to new type #{new_type}" if logger
-                    connection.change_column table_name, field, new_type, **new_attr unless @dry_run
+                    # :name and :type are only collected to detect a change; the column and its new
+                    # type are given positionally, and Rails 7.1 and later reject them as options.
+                    connection.change_column table_name, field, new_type, **new_attr.except(:name, :type) unless @dry_run
                   end
                 end
               end

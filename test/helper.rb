@@ -12,7 +12,20 @@ end
 
 class ActiveRecord::Base
   class << self
-    attr_accessor :logs
+    attr_accessor :logs, :log_depth
+
+    # ActiveRecord::Base.auto_upgrade! calls auto_upgrade! on every model in turn, so only the
+    # outermost call may start a fresh log, otherwise each model wipes out what came before it.
+    def capture_logs
+      ActiveRecord::Base.log_depth = ActiveRecord::Base.log_depth.to_i + 1
+      if ActiveRecord::Base.log_depth == 1
+        ActiveRecord::Base.logs = StringIO.new
+        ActiveRecord::Base.logger = Logger.new(ActiveRecord::Base.logs)
+      end
+      yield
+    ensure
+      ActiveRecord::Base.log_depth -= 1
+    end
 
     def db_fields
       connection.columns(table_name).inject({}) do |hash, column|
@@ -45,15 +58,11 @@ class ActiveRecord::Base
     end
 
     def auto_upgrade!(*args)
-      ActiveRecord::Base.logs = StringIO.new
-      ActiveRecord::Base.logger = Logger.new(ActiveRecord::Base.logs)
-      silence_stream(STDERR) { super }
+      capture_logs { silence_stream(STDERR) { super } }
     end
 
     def auto_upgrade_dry
-      ActiveRecord::Base.logs = StringIO.new
-      ActiveRecord::Base.logger = Logger.new(ActiveRecord::Base.logs)
-      silence_stream(STDERR) { super }
+      capture_logs { silence_stream(STDERR) { super } }
     end
   end
 end # ActiveRecord::Base
@@ -61,12 +70,8 @@ end # ActiveRecord::Base
 # Setup Adapter
 puts "Testing with DB=#{ENV['DB'] || 'sqlite'}"
 case ENV['DB']
-when 'mysql'
-  ActiveRecord::Base.establish_connection(:adapter => 'mysql', :database => 'test', :username => 'root')
-when 'mysql2'
+when 'mysql', 'mysql2'
   ActiveRecord::Base.establish_connection(:adapter => 'mysql2', :database => 'test', :username => 'root')
-  Bundler.require(:test)  # require 'foreigner'
-  Foreigner.load
 when 'pg', 'postgresql'
   ActiveRecord::Base.establish_connection(:adapter => 'postgresql', :database => 'test', :user => 'postgres', :host => 'localhost')
 else
@@ -75,7 +80,7 @@ end
 
 
 # Some helpers to minitest
-class MiniTest::Spec
+class Minitest::Spec
   def connection
     ActiveRecord::Base.connection
   end

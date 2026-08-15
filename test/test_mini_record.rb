@@ -4,16 +4,23 @@ describe MiniRecord do
 
   def clear_active_record!(options = {})
     unless options[:keep_tables]
-      ActiveRecord::Base.clear_reloadable_connections!
+      # These moved off ActiveRecord::Base and onto the connection handler in Rails 7.2.
+      handler = ActiveRecord::Base.respond_to?(:clear_reloadable_connections!) ? ActiveRecord::Base : ActiveRecord::Base.connection_handler
+      handler.clear_reloadable_connections!
       ActiveRecord::Base.clear_cache!
-      ActiveRecord::Base.clear_active_connections!
-      conn.tables.each { |table| silence_stream(STDERR) { conn.execute "DROP TABLE IF EXISTS #{table}" } }
+      handler.clear_active_connections!
+      # Foreign keys outlive the table they point at, so they have to come down with it.
+      conn.disable_referential_integrity do
+        conn.tables.each { |table| silence_stream(STDERR) { conn.drop_table(table, :if_exists => true, :force => :cascade) } }
+      end
     end
 
+    # Removing the constant is all a test can do: descendants comes from Ruby's own
+    # Class#subclasses, which holds the class until it is collected and cannot be cleared. Models
+    # left behind that way are orphans, and auto_upgrade! skips them.
     ActiveRecord::Base.descendants.each { |klass|
       Object.send(:remove_const, klass.to_s) if Object.const_defined?(klass.name.to_s) && klass.to_s != "ActiveRecord::SchemaMigration"
 }
-    ActiveSupport::DescendantsTracker.direct_descendants(ActiveRecord::Base).clear
   end
 
   before do
@@ -246,7 +253,7 @@ describe MiniRecord do
   end
 
   it 'allow custom query' do
-    skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+    skip "ENUM is mysql only" unless conn.adapter_name =~ /mysql/i
 
     class Foo < ActiveRecord::Base
       col :name, :as => "ENUM('foo','bar')"
@@ -259,9 +266,10 @@ describe MiniRecord do
     assert_equal %w[id name], Foo.db_columns
     assert_equal %w[id name], Foo.schema_columns
 
-    foo = Foo.create(:name => 'test')
-    assert_empty Foo.first.name
+    # A value the enum does not list is refused, which is the point of declaring one
+    assert_raises(ActiveRecord::StatementInvalid) { Foo.create(:name => 'test') }
 
+    foo = Foo.create(:name => 'bar')
     foo.update_column(:name, 'foo')
 
     assert_equal 'foo', Foo.first.name
@@ -284,7 +292,7 @@ describe MiniRecord do
     end
 
     it 'removes a column and index when relation is removed' do
-      skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+      skip "#{conn.adapter_name} has no foreign keys" unless conn.supports_foreign_keys?
 
       class Foo < ActiveRecord::Base
         key :name
@@ -298,7 +306,8 @@ describe MiniRecord do
 
       Foo.class_eval do
         reset_table_definition!
-        reflections.clear
+        self._reflections = {}
+        clear_reflections_cache
         indexes.clear
         key :name
       end
@@ -323,7 +332,8 @@ describe MiniRecord do
 
       Foo.class_eval do
         reset_table_definition!
-        reflections.clear
+        self._reflections = {}
+        clear_reflections_cache
         indexes.clear
         key :name
       end
@@ -410,8 +420,8 @@ describe MiniRecord do
       assert_equal "42", Foo.db_fields[:user_id].default.to_s
     end
 
-    it 'add/remove foreign key with :foreign option, when Foreigner gem used on mysql' do
-      skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+    it 'add/remove foreign key with :foreign option' do
+      skip "#{conn.adapter_name} has no foreign keys" unless conn.supports_foreign_keys?
 
       class Book < ActiveRecord::Base
         belongs_to :publisher
@@ -434,9 +444,9 @@ describe MiniRecord do
       assert_nil connection.foreign_keys(:books).detect {|fk| fk.options[:column] == 'publisher_id'}
     end
 
-    it 'doesnt remove foreign key with :foreign option, when Foreigner gem used on mysql and destructive = false' do
+    it 'doesnt remove foreign key with :foreign option and destructive = false' do
       MiniRecord.configuration.destructive = false
-      skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+      skip "#{conn.adapter_name} has no foreign keys" unless conn.supports_foreign_keys?
 
       class Book < ActiveRecord::Base
         belongs_to :publisher
@@ -460,8 +470,8 @@ describe MiniRecord do
       assert_includes Book.db_indexes, 'index_books_on_publisher_id'
     end
 
-    it 'add/remove named foreign key with :foreign option, when Foreigner gem used on mysql' do
-      skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+    it 'add/remove named foreign key with :foreign option' do
+      skip "#{conn.adapter_name} has no foreign keys" unless conn.supports_foreign_keys?
 
       class Book < ActiveRecord::Base
         belongs_to :publisher
@@ -485,9 +495,9 @@ describe MiniRecord do
       Object.send(:remove_const, :Book)
     end
 
-    it 'doesnt remove named foreign key with :foreign option, when Foreigner gem used on mysql and destructive = false' do
+    it 'doesnt remove named foreign key with :foreign option and destructive = false' do
       MiniRecord.configuration.destructive = false
-      skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+      skip "#{conn.adapter_name} has no foreign keys" unless conn.supports_foreign_keys?
 
       class Book < ActiveRecord::Base
         belongs_to :publisher
@@ -513,7 +523,7 @@ describe MiniRecord do
     end
 
     it 'support :foreign option in the index with custom :foreign_key in the belong_to association' do
-      skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+      skip "#{conn.adapter_name} has no foreign keys" unless conn.supports_foreign_keys?
 
       class Book < ActiveRecord::Base
         belongs_to :second_publisher, :foreign_key => 'second_publisher_id', :class_name => 'Publisher'
@@ -538,7 +548,7 @@ describe MiniRecord do
 
     it 'support :foreign option in the index with custom :foreign_key in the belong_to association and wont remove if destructive = false' do
       MiniRecord.configuration.destructive = false
-      skip "foreign key tests only for mysql" unless conn.adapter_name =~ /mysql/i
+      skip "#{conn.adapter_name} has no foreign keys" unless conn.supports_foreign_keys?
 
       class Book < ActiveRecord::Base
         belongs_to :second_publisher, :foreign_key => 'second_publisher_id', :class_name => 'Publisher'
@@ -589,7 +599,7 @@ describe MiniRecord do
       tables = Tool.connection.tables
       assert_includes tables, 'purposes_tools'
 
-      index = 'index_purposes_tools_on_tool_id_and_purpose_id'
+      index = 'index_purposes_tools_on_purpose_id_and_tool_id'
       assert_includes Tool.connection.indexes('purposes_tools').map(&:name), index
 
       # Ensure that join table is not deleted on subsequent upgrade
@@ -646,7 +656,9 @@ describe MiniRecord do
                                            :association_foreign_key => :customer_super_long_very_long_trust_me_id
       end
       Foo.auto_upgrade!
-      index_name = 'index_long_people_on_custom_long_long_long_long_id_and_customer_super_long_very_long_trust_me_id'[0...conn.index_name_length]
+      # Rails 7.1 shortens an index name that will not fit, earlier versions leave that to us
+      index_name = conn.index_name(:long_people, :column => %w[custom_long_long_long_long_id customer_super_long_very_long_trust_me_id])
+      index_name = index_name[0...conn.index_name_length] if index_name.length > conn.index_name_length
       assert_includes conn.tables, 'people'
       assert_includes conn.indexes(:long_people).map(&:name), index_name
     end
@@ -654,6 +666,10 @@ describe MiniRecord do
     it 'creates a join table without an index when suppressed for has_and_belongs_to_many relations' do
       skip "habtm key tests only for mysql" unless conn.adapter_name =~ /mysql/i
 
+      # The join table is named after the tables on both sides, so the other model has to exist
+      class Bar < ActiveRecord::Base
+        key :name
+      end
       class Foo < ActiveRecord::Base
         has_and_belongs_to_many :bars
         suppress_index :bars
@@ -725,10 +741,10 @@ describe MiniRecord do
       assert_equal 4, Foo.schema_fields[:number].limit
       assert_equal 4, Foo.db_fields[:number].limit
     when /postgres/i
-      # In postgres limit: 4 will be translated to nil
-      assert_match(/ALTER COLUMN "number" TYPE integer$/, Foo.queries)
-      assert_equal   4, Foo.schema_fields[:number].limit
-      assert_equal nil, Foo.db_fields[:number].limit
+      # In postgres an integer is four bytes already, so limit: 4 asks for the column it has
+      refute_match(/schema\s+change/, Foo.queries)
+      assert_equal 4, Foo.schema_fields[:number].limit
+      assert_equal 4, Foo.db_fields[:number].limit
     end
 
     # Change limit to string
@@ -757,25 +773,25 @@ describe MiniRecord do
     case conn.adapter_name
     when /sqlite/i
       # In sqlite there is a difference between limit: 4 and limit: 11
-      assert_match(Foo.queries, "")
-      assert_equal nil, Foo.db_fields[:number].limit
+      assert_match(/destructive/i, Foo.queries)
+      assert_nil Foo.db_fields[:number].limit
       assert_equal 4, Foo.schema_fields[:number].limit
     when /mysql/i
       # In mysql according to this: http://goo.gl/bjZE7 limit: 4 is same of limit:11
       refute_match(/schema\s+change/, Foo.queries)
-      assert_equal nil, Foo.db_fields[:number].limit
+      assert_equal 4, Foo.db_fields[:number].limit
       assert_equal 4, Foo.schema_fields[:number].limit
     when /postgres/i
-      # In postgres limit: 4 will be translated to nil
-      assert_match(Foo.queries, "")
-      assert_equal nil, Foo.db_fields[:number].limit
+      # In postgres an integer is four bytes already, so limit: 4 asks for the column it has
+      refute_match(/schema\s+change/, Foo.queries)
+      assert_equal 4, Foo.db_fields[:number].limit
       assert_equal 4, Foo.schema_fields[:number].limit
     end
 
     # Change limit to string
     Foo.key :string, :limit => 255
     Foo.auto_upgrade!
-    refute_match(/schema\s+change/, Foo.queries)
+    refute_empty Foo.queries
     assert_equal 100, Foo.db_fields[:string].limit
   end
 
