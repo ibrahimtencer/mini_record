@@ -508,7 +508,7 @@ module MiniRecord
 
             if @destructive_change_needed
               message = "[MiniRecord] Destructive changes are needed to update your database to match the schema, and you have the `destructive` option in Mini Record set to `false`.  Please enable destructive mode and re-run, or make this change manually."
-              logger.error message
+              logger.error message if logger
               raise "#{message} If you can't see the change needed, check your Rails logs." if MiniRecord.configuration.raise_on_destructive_change_needed == true
             end
 

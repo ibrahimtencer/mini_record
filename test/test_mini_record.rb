@@ -974,7 +974,7 @@ describe MiniRecord do
     assert_equal 'USD', foo.currency_iso
 
     Foo.auto_upgrade!
-    assert_match('', Foo.queries)
+    refute_match(/\[MiniRecord\]/, Foo.queries)
 
   end
 
@@ -993,22 +993,74 @@ describe MiniRecord do
 
     Foo.auto_upgrade!
 
-    case conn.adapter_name
-    when /sqlite/i
-      assert_match("", Foo.queries)
-    when /mysql/i
-      assert_match("", Foo.queries)
-    when /postgres/i
-      assert_match("", Foo.queries)
-    end
+    assert_match(/foos.currency to currency_iso/i, Foo.queries)
+    assert_match(/destructive/i, Foo.queries)
 
+    # The column the schema now asks for is added, but it is the old one that still holds the
+    # value: renaming would have thrown the original column away, and that is the destructive part.
     cols = conn.columns('foos').map(&:name)
     assert_includes cols, "currency_iso"
     assert_includes cols, "currency"
+    assert_equal 'USD', Foo.first.currency
+    assert_nil Foo.first.currency_iso
 
     Foo.auto_upgrade!
-    assert_match('', Foo.queries)
+    refute_match(/\[MiniRecord\]/, Foo.queries)
 
+  end
+
+  it 'should rename a column twice in a row' do
+    class Foo < ActiveRecord::Base
+      field :color, :index => true
+    end
+    Foo.auto_upgrade!
+    Foo.create :color => 'red'
+
+    Foo.class_eval do
+      reset_table_definition!
+      indexes.clear
+      rename_col :color, :new_name => :body_color
+      rename_field :body_color, :new_name => :chassis_color
+      field :chassis_color, :index => true
+    end
+    Foo.auto_upgrade!
+
+    assert_equal %w[chassis_color id], Foo.db_columns
+    assert_equal 'red', Foo.first.chassis_color
+    assert_equal %w[index_foos_on_chassis_color], Foo.db_indexes
+  end
+
+  it 'should not rename a column over one that is already there' do
+    class Foo < ActiveRecord::Base
+      field :old_name
+      field :new_name
+    end
+    Foo.auto_upgrade!
+    Foo.create :old_name => 'kept', :new_name => 'also kept'
+
+    Foo.rename_field :old_name, :new_name => :new_name
+    Foo.auto_upgrade!
+
+    refute_match(/renaming/i, Foo.queries)
+    foo = Foo.first
+    assert_equal 'kept', foo.old_name
+    assert_equal 'also kept', foo.new_name
+  end
+
+  it 'should not rename a column in a dry run' do
+    class Foo < ActiveRecord::Base
+      field :before_name
+    end
+    Foo.auto_upgrade!
+    Foo.create :before_name => 'unmoved'
+
+    Foo.rename_field :before_name, :new_name => :after_name
+    Foo.field :after_name
+    Foo.auto_upgrade_dry
+
+    assert_match(/foos.before_name to after_name/i, Foo.queries)
+    assert_equal %w[before_name id], Foo.db_columns
+    assert_equal 'unmoved', Foo.first.before_name
   end
 
   it 'accepts create_table options' do
