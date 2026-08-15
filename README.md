@@ -1,11 +1,10 @@
-[![Build Status](https://secure.travis-ci.org/DAddYE/mini_record.png)](http://travis-ci.org/DAddYE/mini_record)
-
-
 MiniRecord is a **micro** extension for the `ActiveRecord` gem.
 
 MiniRecord will allow you to create/edit/manage columns, directly in your **model**.
 
-NOTE: rename\_field does NOT WORK with Ruby 3 yet. Do not use.
+Requires ActiveRecord `>= 7.0, < 8.0`. Tested on Ruby 3 against sqlite3, PostgreSQL and MySQL.
+
+This is a fork of MiniRecord by Davide D'Agostino, which is no longer maintained. Now maintained by Ibrahim Tencer, with assistance from Claude Code.
 
 ## Features
 
@@ -30,7 +29,9 @@ To optionally block any destructive actions on the database, create a file `conf
 
 ```ruby
 MiniRecord.configure do |config|
-  config.destructive = false
+  config.destructive = false                        # never drop or change a column, only add
+  config.raise_on_destructive_change_needed = true  # raise, rather than only log, when one is needed
+  config.table_whitelist = %w[legacy_table]         # tables to keep when dropping ones not in any model
 end
 ```
 
@@ -59,8 +60,8 @@ If the option `:as` is omitted, minirecord will assume it's a `:string`.
 Remember that as for `ActiveRecord` you can choose different types:
 
 ```ruby
-:primary_key, :string, :text, :integer, :float, :decimal, :datetime, :timestamp, :time,
-:date, :binary, :boolean, :references, :belongs_to, :timestamp
+:primary_key, :string, :text, :integer, :bigint, :float, :decimal, :datetime, :timestamp,
+:time, :date, :binary, :boolean, :references, :belongs_to
 ```
 
 You can also provide other options like:
@@ -83,6 +84,8 @@ for more details.
 Finally, when you execute `MyModel.auto_upgrade!`, missing columns, indexes and tables will be created on the fly. 
 
 Indexes and columns present in the db but **not** in your model schema/definition will be **deleted** also from your db.
+
+`MyModel.auto_upgrade_dry` reports what it would change without touching the database.
 
 ### Single Table Inheritance
 
@@ -109,7 +112,7 @@ class Address < ActiveRecord::Base
   belongs_to :person
 end
 ```
-Will result in a indexed `person_id` column. You can use a different one using the `foreign_key` option:
+Will result in an indexed `person_id` column, a `bigint` so that it can hold the primary key it points at. You can use a different one using the `foreign_key` option:
 
 ```ruby
 belongs_to :person, foreign_key: :person_pk
@@ -124,8 +127,8 @@ class Address < ActiveRecord::Base
 end
 ```
 
-This is the same example, but foreign key will be added to the database with help of
-[foreigner](https://github.com/matthuhiggins/foreigner) gem.
+This is the same example, but the foreign key will be added to the database as well, through
+ActiveRecord's own foreign key support. No extra gem is needed.
 
 In this case you have more control (if needed).
 
@@ -143,7 +146,7 @@ end
 Will create an `addressable_id` and an `addressable_type` column with composite indexes:
 
 ```ruby
-add_index(:addresses), [:addressable_id, :addressable_type]
+add_index :addresses, [:addressable_id, :addressable_type]
 ```
 
 #### habtm
@@ -224,7 +227,7 @@ and later on you'll figure out that you wanted a `float`
 field :total, as: :float
 ```
 
-Will automatically change the type the the first time you'll invoke `auto_upgrade`.
+Will automatically change the type the first time you'll invoke `auto_upgrade`.
 
 
 ### Add/Remove indexes
@@ -245,9 +248,12 @@ class Fox < ActiveRecord::Base
   field :foo, index: true
   field :foo, index: :custom_name
   field :foo, index: [:foo, :bar]
-  field :foo, index: { column: [:branch_id, :party_id], unique: true, name: 'by_branch_party' }
+  field :foo, index: { unique: true, name: 'by_foo' }
 end
 ```
+
+A hash carries the options for the index, and indexes the field it is given to. To index other
+columns, name them in the option, as in the third line above.
 
 Here is where `add_index` comes handy, so you can rewrite the above in:
 
@@ -257,8 +263,14 @@ class Fox < ActiveRecord::Base
   add_index :foo
   add_index :custom_name
   add_index [:foo, :bar]
-  add_index [:branch_id, :party_id], unique: true, name: 'by_branch_party'
+  add_index :foo, unique: true, name: 'by_foo'
 end
+```
+
+`add_index` takes any columns you like, whichever fields the model declares:
+
+```ruby
+add_index [:branch_id, :party_id], unique: true, name: 'by_branch_party'
 ```
 
 ### Suppress default indexes for associations
