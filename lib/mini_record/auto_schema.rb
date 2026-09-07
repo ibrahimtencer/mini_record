@@ -42,9 +42,21 @@ module MiniRecord
 
         @_table_definition ||= begin
           tb = init_table_definition(connection)
-          tb.primary_key(primary_key)
+          tb.primary_key(primary_key) if single_primary_key?
           tb
         end
+      end
+
+      def column_options(column)
+        options = {:limit => column.limit, :precision => column.precision, :scale => column.scale}
+        options[:default] = column.default unless column.default.nil?
+        options[:null]    = column.null    unless column.null.nil?
+        options
+      end
+
+      def single_primary_key?
+        #a model with no primary key has none to name, and one with a composite key names columns that are declared in their own right, so neither gets a key column of its own
+        primary_key && !primary_key.is_a?(Array)
       end
 
       def indexes
@@ -380,17 +392,6 @@ module MiniRecord
           descendants.reject(&:orphaned_model?).each { |model| model.auto_upgrade!(@dry_run) }
           clear_tables!
         else
-          # If table doesn't exist, create it
-          unless connection.data_sources.include?(table_name)
-            class << connection; attr_accessor :table_definition; end unless connection.respond_to?(:table_definition=)
-            logger.warn "[MiniRecord] Creating Table #{table_name}" if logger
-            unless @dry_run
-              connection.table_definition = table_definition
-              connection.create_table(table_name, **create_table_options)
-              connection.table_definition = init_table_definition(connection)
-            end
-          end
-
           # Add this to our schema tables
           schema_tables << table_name unless schema_tables.include?(table_name)
 
@@ -452,6 +453,19 @@ module MiniRecord
             index inheritance_column
           end
 
+          #the table is created once the associations have had their say, so that a model without a single primary key can carry its columns and its key into the CREATE TABLE, having no id column to stand the table up on its own
+          unless connection.data_sources.include?(table_name)
+            logger.warn "[MiniRecord] Creating Table #{table_name}" if logger
+            unless @dry_run
+              key_options = single_primary_key? ? {} : (primary_key ? {:primary_key => primary_key} : {:id => false})
+              #a virtual column is left to the adding pass below, which knows how to write its expression
+              initial_columns = single_primary_key? ? [] : fields.values.reject { |column| column.instance_variable_get(:@virtual) }
+              connection.create_table(table_name, **key_options.merge(create_table_options)) do |t|
+                initial_columns.each { |column| t.column(column.name, column.type, **column_options(column)) }
+              end
+            end
+          end
+
           if connection.data_sources.include?(table_name)
 
             # Rename fields
@@ -479,7 +493,8 @@ module MiniRecord
 
             # Change attributes of existent columns
             (fields.keys & fields_in_db.keys).each do |field|
-              if field != primary_key #ActiveRecord::Base.get_primary_key(table_name)
+              #a key column is not null whatever the schema says about it, and a database will refuse to make it nullable, so leave the whole key alone
+              unless Array(primary_key).include?(field)
                 new_attr, changed = field_attr_changes(field)
 
                 # Change the column if applicable
@@ -515,17 +530,14 @@ module MiniRecord
             # Add fields to db new to schema
             columns_to_add = fields.keys - fields_in_db.keys
             columns_to_add.each do |field|
-              column  = fields[field]
-              options = {:limit => column.limit, :precision => column.precision, :scale => column.scale}
-              options[:default] = column.default unless column.default.nil?
-              options[:null]    = column.null    unless column.null.nil?
+              column = fields[field]
               logger.warn "[MiniRecord] Adding column #{table_name}.#{column.name}" if logger
               if (virtual = column.instance_variable_get(:@virtual))
                 # Rails 4.x and 5.0 virtual column super-kludge.
                 column_type_sql = get_sql_field_type(column)
                 connection.add_column table_name, column.name, "#{column_type_sql} GENERATED ALWAYS AS (#{virtual}) VIRTUAL" unless @dry_run
               else
-                connection.add_column table_name, column.name, column.type.to_sym, **options unless @dry_run
+                connection.add_column table_name, column.name, column.type.to_sym, **column_options(column) unless @dry_run
               end
             end
 

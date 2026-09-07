@@ -1063,6 +1063,44 @@ describe MiniRecord do
     assert_equal 'unmoved', Foo.first.before_name
   end
 
+  it 'builds a join table for a model with no primary key' do
+    class CategoryPost < ActiveRecord::Base
+      self.primary_key = nil
+      belongs_to :category
+      belongs_to :post
+    end
+    CategoryPost.auto_upgrade!
+
+    assert_equal %w[category_id post_id], CategoryPost.db_columns
+    assert_empty conn.primary_keys('category_posts')
+    CategoryPost.create(:category_id => 1, :post_id => 2)
+    assert_equal 1, CategoryPost.first.category_id
+
+    CategoryPost.auto_upgrade!
+    refute_match(/alter/i, CategoryPost.queries)
+    assert_equal 1, CategoryPost.count
+  end
+
+  it 'builds a join table for a model with a composite primary key' do
+    skip 'composite primary keys arrived in Rails 7.1' unless ActiveRecord.version >= Gem::Version.new('7.1')
+
+    class CategoryPost < ActiveRecord::Base
+      self.primary_key = [:category_id, :post_id]
+      belongs_to :category
+      belongs_to :post
+    end
+    CategoryPost.auto_upgrade!
+
+    assert_equal %w[category_id post_id], CategoryPost.db_columns
+    assert_equal %w[category_id post_id], conn.primary_keys('category_posts')
+    CategoryPost.create(:category_id => 1, :post_id => 2)
+    assert_equal [1, 2], CategoryPost.first.id
+
+    CategoryPost.auto_upgrade!
+    refute_match(/alter/i, CategoryPost.queries)
+    assert_equal 1, CategoryPost.count
+  end
+
   it 'accepts create_table options' do
     class Foo < ActiveRecord::Base
       create_table options: "extra options"
