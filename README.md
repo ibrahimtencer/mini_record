@@ -2,7 +2,7 @@ MiniRecord is a **micro** extension for the `ActiveRecord` gem.
 
 MiniRecord will allow you to create/edit/manage columns, directly in your **model**.
 
-Requires ActiveRecord `>= 7.0, < 8.0`. Tested on Ruby 3 against sqlite3, PostgreSQL and MySQL.
+Requires ActiveRecord `>= 7.0, < 9.0` (Rails 7.0 through 8.1). Tested on Ruby 3 against sqlite3, PostgreSQL, and MySQL.
 
 This is a fork of MiniRecord by Davide D'Agostino, which is no longer maintained. Now maintained by Ibrahim Tencer, with assistance from Claude Code.
 

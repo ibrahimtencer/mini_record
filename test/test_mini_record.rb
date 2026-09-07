@@ -1074,7 +1074,8 @@ describe MiniRecord do
     assert_equal %w[category_id post_id], CategoryPost.db_columns
     assert_empty conn.primary_keys('category_posts')
     CategoryPost.create(:category_id => 1, :post_id => 2)
-    assert_equal 1, CategoryPost.first.category_id
+    #with no primary key there is no implicit order for first, which Rails 8.2 makes an error
+    assert_equal 1, CategoryPost.take.category_id
 
     CategoryPost.auto_upgrade!
     refute_match(/alter/i, CategoryPost.queries)

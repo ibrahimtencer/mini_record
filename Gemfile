@@ -9,10 +9,7 @@ gem 'sqlite3'
 gem 'pg'
 gem 'mysql2'
 
-# Uncomment to test older versions, then "bundle update"
-# gem 'activerecord', '<= 3.2'
-# gem 'activerecord', '~> 4.0.0'
-# gem 'activerecord', '~> 4.1.0'
-gem 'activerecord', '>= 7.0', '< 8.0'
+# Test a specific Rails version with "BUNDLE_GEMFILE=gemfiles/rails_8_1.gemfile bundle exec rake test"
+gem 'activerecord', '>= 7.0', '< 9.0'
 
 gemspec
