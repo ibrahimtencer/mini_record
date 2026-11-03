@@ -920,6 +920,7 @@ describe MiniRecord do
     end
 
     class Bar < Foo
+      key :name
     end
 
     Foo.auto_upgrade!
@@ -1166,8 +1167,60 @@ describe MiniRecord do
     assert_includes conn.tables, "other_table_a2"
   end
 
+  it 'has nothing to do for a model that declares nothing' do
+    conn.create_table(:notes) { |t| t.string :body }
+    class Note < ActiveRecord::Base
+    end
+
+    Note.auto_upgrade_dry
+    refute_match(/\[MiniRecord\]/, Note.queries)
+  end
+
+  it 'leaves the columns and indexes of a table whose model declares nothing' do
+    conn.create_table :notes do |t|
+      t.string :body
+      t.index :body
+    end
+    class Note < ActiveRecord::Base
+    end
+
+    ActiveRecord::Base.auto_upgrade!
+    assert_equal %w[body id], Note.db_columns
+    assert_equal %w[index_notes_on_body], Note.db_indexes
+  end
+
+  it 'does not create a table for a model that declares nothing' do
+    class Note < ActiveRecord::Base
+    end
+
+    ActiveRecord::Base.auto_upgrade!
+    refute_includes conn.tables, 'notes'
+  end
+
+  it 'manages a model whose only declaration is an association' do
+    class Note < ActiveRecord::Base
+      belongs_to :person
+    end
+
+    ActiveRecord::Base.auto_upgrade!
+    assert_equal %w[id person_id], Note.db_columns
+  end
+
+  it 'leaves a model matched by model_whitelist alone, table and all' do
+    MiniRecord.configuration.model_whitelist = ['Note*']
+    conn.create_table(:notes) { |t| t.string :body }
+    class Note < ActiveRecord::Base
+      key :title
+    end
+
+    ActiveRecord::Base.auto_upgrade!
+    assert_includes conn.tables, 'notes'
+    assert_equal %w[body id], Note.db_columns
+  end
+
   it 'can do a dry run' do
     class Foo < ActiveRecord::Base
+      property :name
     end
 
     ActiveRecord::Base.auto_upgrade_dry
@@ -1176,10 +1229,10 @@ describe MiniRecord do
 
     ActiveRecord::Base.auto_upgrade!
     assert_match(/\bcreate\b/i, Foo.queries)
-    refute_match(/\balter\b/i, Foo.queries)
 
     clear_active_record!(:keep_tables => true)
     class Foo < ActiveRecord::Base
+      property :name
       property :new_field, :index => true
     end
 

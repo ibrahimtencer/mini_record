@@ -32,10 +32,19 @@ MiniRecord.configure do |config|
   config.destructive = false                        # never drop or change a column, only add
   config.raise_on_destructive_change_needed = true  # raise, rather than only log, when one is needed
   config.table_whitelist = %w[legacy_table]         # tables to keep when dropping ones not in any model
+  config.model_whitelist += %w[Legacy::*]           # models whose tables mini_record does not manage
 end
 ```
 
 That's all!
+
+A model that declares no field, index, renaming, table option, `belongs_to`, or
+`has_and_belongs_to_many` has said nothing about its table, so mini_record leaves it alone: it
+neither creates the table nor removes anything from it. The same goes for a model matched by
+`model_whitelist`, which starts out holding the models of Active Record's own bookkeeping, Active
+Storage, Action Text, Action Mailbox, Solid Queue, Solid Cache, and Solid Cable, whose tables come
+with their own schemas. Add to that list any other gem whose models you load, and declare a field
+on your own models if you want their tables built.
 
 ## Examples
 

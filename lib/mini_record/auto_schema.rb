@@ -260,14 +260,31 @@ module MiniRecord
         end
       end
 
-      def table_whitelist_match?(table_name)
-        MiniRecord.configuration.table_whitelist.any? do |matcher|
+      def whitelist_match? matchers, value
+        matchers.any? do |matcher|
           if matcher.respond_to?(:to_str)
-            File.fnmatch?(matcher, table_name, File::FNM_CASEFOLD || File::FNM_DOTMATCH)
+            File.fnmatch?(matcher, value, File::FNM_CASEFOLD | File::FNM_DOTMATCH)
           else
-            matcher === table_name
+            matcher === value
           end
         end
+      end
+
+      def table_whitelist_match? table_name
+        whitelist_match?(MiniRecord.configuration.table_whitelist, table_name)
+      end
+
+      def model_whitelist_match?
+        whitelist_match?(MiniRecord.configuration.model_whitelist, name.to_s)
+      end
+
+      #whether the model has declared a field, an index, a renaming, its table options, or an association that carries a column with it. A model that has declared none of them has said nothing at all about its table, which is not the same as saying the table holds nothing.
+      def declares_no_schema?
+        #the primary key column is added by table_definition itself, so it is not a declaration, while the columns of a composite key are declared in their own right
+        declared_fields = single_primary_key? ? fields.keys - [primary_key.to_s] : fields.keys
+        #create_table on ApplicationRecord says nothing about this model in particular, so read only its own options
+        declared_fields.empty? && indexes.empty? && rename_fields.empty? && !@create_table_options &&
+          reflect_on_all_associations.none? { |association| [:belongs_to, :has_and_belongs_to_many].include?(association.macro) }
       end
 
       def foreign_keys
@@ -382,9 +399,6 @@ module MiniRecord
       def auto_upgrade!(dry_run = false)
         return unless connection?
         return if respond_to?(:abstract_class?) && abstract_class?
-        return if defined?(ActiveRecord::SchemaMigration) and self == ActiveRecord::SchemaMigration
-        return if defined?(ActiveStorage::Attachment) and self == ActiveStorage::Attachment
-        return if defined?(ActiveStorage::Blob) and self == ActiveStorage::Blob
         @dry_run = dry_run
         @destructive_change_needed = false
 
@@ -392,8 +406,10 @@ module MiniRecord
           descendants.reject(&:orphaned_model?).each { |model| model.auto_upgrade!(@dry_run) }
           clear_tables!
         else
-          # Add this to our schema tables
+          #registered before the skips below, so that clear_tables! does not drop the table of a model mini_record leaves alone
           schema_tables << table_name unless schema_tables.include?(table_name)
+
+          return if model_whitelist_match? || declares_no_schema?
 
           # Generate fields from associations
           if reflect_on_all_associations.any?
