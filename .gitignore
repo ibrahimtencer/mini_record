@@ -6,3 +6,6 @@ pkg/*
 *.swp
 *.swo
 gemfiles/*.lock
+vendor/
+tags
+llm_notes/
